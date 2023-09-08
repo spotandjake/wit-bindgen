@@ -12,6 +12,8 @@ use wit_bindgen_core::{
     Files, InterfaceGenerator, Source, WorldGenerator,
 };
 
+use heck::{ToLowerCamelCase, ToUpperCamelCase};
+
 #[derive(Default, Debug, Clone)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct Opts {}
@@ -40,6 +42,7 @@ pub struct Grain {
     // one set of types is generated and all bindings for both imports and
     // exports use that set of types.
     interfaces_with_types_printed: HashSet<InterfaceId>,
+    return_pointer_area_size: usize,
 }
 
 impl Grain {
@@ -193,7 +196,39 @@ impl WorldGenerator for Grain {
     }
 
     fn finish(&mut self, resolve: &Resolve, world: WorldId, files: &mut Files) {
-        todo!()
+        let world = &resolve.worlds[world];
+        let mut full_src = Source::default();
+
+        full_src.push_str(&format!("module {}\n\n", world.name.to_upper_camel_case()));
+
+        // TODO: Selectively include only used libraries
+        full_src.push_str("include \"runtime/dataStructures\" as DataStructures\n");
+        full_src.push_str("include \"runtime/unsafe/wasmi32\" as WasmI32\n");
+        full_src.push_str("include \"runtime/unsafe/wasmi64\" as WasmI64\n");
+        full_src.push_str("include \"runtime/unsafe/wasmf32\" as WasmF32\n");
+        full_src.push_str("include \"runtime/unsafe/wasmf64\" as WasmF64\n");
+        full_src.push_str("include \"runtime/unsafe/memory\" as Memory\n");
+        full_src.push_str("include \"int32\" as Int32\n");
+        full_src.push_str("include \"int64\" as Int64\n");
+        full_src.push_str("include \"char\" as Char\n");
+        full_src.push_str("include \"list\" as List\n");
+
+        full_src.push_str("\n");
+
+        if self.return_pointer_area_size > 0 {
+            full_src.push_str("@unsafe\n");
+            full_src.push_str(&format!(
+                "let _RET_AREA = Memory.malloc({}n)\n\n",
+                self.return_pointer_area_size
+            ));
+        }
+
+        full_src.push_str(self.src.as_mut_string());
+
+        files.push(
+            &format!("{}.gr", world.name.to_lower_camel_case()),
+            full_src.as_bytes(),
+        );
     }
 }
 
