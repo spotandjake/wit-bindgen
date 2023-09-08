@@ -310,7 +310,7 @@ impl<'a> InterfaceGenerator<'a> for GrainInterfaceGenerator<'a> {
         }
 
         self.src.push_str(&format!(
-            "export record {r} {{",
+            "provide record {r} {{",
             r = name.to_lower_camel_case()
         ));
         for (_i, field) in record.fields.iter().enumerate() {
