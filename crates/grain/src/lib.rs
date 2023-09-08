@@ -6,8 +6,8 @@ use std::{
 use heck::*;
 use wit_bindgen_core::{
     wit_parser::{
-        self, Flags, FlagsRepr, Function, Int, InterfaceId, Resolve, SizeAlign, Type, TypeId,
-        WorldId, WorldKey,
+        self, Flags, FlagsRepr, Function, Int, InterfaceId, Resolve, Result_, SizeAlign, Tuple,
+        Type, TypeDef, TypeDefKind, TypeId, WorldId, WorldKey,
     },
     Files, InterfaceGenerator, Source, WorldGenerator,
 };
@@ -243,6 +243,71 @@ struct GrainInterfaceGenerator<'a> {
 }
 
 impl GrainInterfaceGenerator<'_> {
+    pub fn is_empty_type(&mut self, ty: &TypeDef) -> bool {
+        match &ty.kind {
+            TypeDefKind::Type(t) => {
+                let def = match t {
+                    Type::Id(id) => &self.resolve().types[*id],
+                    _ => return false,
+                };
+                self.is_empty_type(def)
+            }
+            TypeDefKind::Record(r) => r.fields.is_empty(),
+            TypeDefKind::Tuple(t) => t.types.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn print_tydef(&mut self, ty: &TypeDefKind) {
+        match ty {
+            TypeDefKind::Type(t) => self.print_ty(t),
+            TypeDefKind::List(Type::Char) => self.src.push_str("String"),
+            TypeDefKind::List(Type::U8) => self.src.push_str("Bytes"),
+            TypeDefKind::List(t) => {
+                self.src.push_str("List<");
+                self.print_ty(t);
+                self.src.push_str(">");
+            }
+            TypeDefKind::Option(t) => {
+                self.src.push_str("Option<");
+                self.print_ty(t);
+                self.src.push_str(">");
+            }
+            TypeDefKind::Result(Result_ { ok, err }) => {
+                self.src.push_str("Result<");
+                match ok {
+                    Some(ty) => self.print_ty(ty),
+                    None => self.src.push_str("Void"),
+                }
+                self.src.push_str(", ");
+                match err {
+                    Some(ty) => self.print_ty(ty),
+                    None => self.src.push_str("Void"),
+                }
+                self.src.push_str(">");
+            }
+            TypeDefKind::Tuple(Tuple { types }) => {
+                if types.len() == 0 {
+                    // Grain does not have zero-length tuples
+                    self.src.push_str("Void");
+                    return;
+                }
+                self.src.push_str("(");
+                let singleton = types.len() == 1;
+                for (i, ty) in types.iter().enumerate() {
+                    self.print_ty(ty);
+                    if singleton || i != types.len() - 1 {
+                        self.src.push_str(", ");
+                    }
+                }
+                self.src.push_str(")");
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+    }
+
     fn print_ty(&mut self, ty: &Type) {
         match ty {
             Type::Bool => self.src.push_str("Bool"),
@@ -259,7 +324,18 @@ impl GrainInterfaceGenerator<'_> {
             Type::Char => self.src.push_str("Char"),
             Type::String => self.src.push_str("String"),
             Type::Id(id) => {
-                todo!()
+                let types = &self.resolve().types;
+                let ty = &types[*id];
+                if self.is_empty_type(&ty) {
+                    self.src.push_str("Void");
+                    return;
+                }
+                let ty = &types[*id];
+                if let Some(name) = &ty.name {
+                    self.src.push_str(&name.to_upper_camel_case());
+                    return;
+                }
+                self.print_tydef(&ty.kind);
             }
         }
     }
@@ -323,7 +399,7 @@ impl GrainInterfaceGenerator<'_> {
     }
 
     fn finish(&mut self) {
-        todo!()
+        // todo!()
     }
 }
 
@@ -341,6 +417,10 @@ impl<'a> InterfaceGenerator<'a> for GrainInterfaceGenerator<'a> {
     ) {
         if record.fields.is_empty() {
             // Empty records don't exist in Grain
+            self.src.push_str(&format!(
+                "provide type {r} = Void\n",
+                r = name.to_upper_camel_case()
+            ));
             return;
         }
 
