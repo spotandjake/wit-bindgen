@@ -3,9 +3,11 @@ use std::{
     mem,
 };
 
+use heck::*;
 use wit_bindgen_core::{
     wit_parser::{
-        self, Function, InterfaceId, Resolve, SizeAlign, Type, TypeId, WorldId, WorldKey,
+        self, Flags, FlagsRepr, Function, Int, InterfaceId, Resolve, SizeAlign, Type, TypeId,
+        WorldId, WorldKey,
     },
     Files, InterfaceGenerator, Source, WorldGenerator,
 };
@@ -206,6 +208,27 @@ struct GrainInterfaceGenerator<'a> {
 }
 
 impl GrainInterfaceGenerator<'_> {
+    fn print_ty(&mut self, ty: &Type) {
+        match ty {
+            Type::Bool => self.src.push_str("Bool"),
+            Type::U8 => self.src.push_str("Uint8"),
+            Type::S8 => self.src.push_str("Int8"),
+            Type::U16 => self.src.push_str("Uint16"),
+            Type::S16 => self.src.push_str("Int16"),
+            Type::U32 => self.src.push_str("Uint32"),
+            Type::S32 => self.src.push_str("Int32"),
+            Type::U64 => self.src.push_str("Uint64"),
+            Type::S64 => self.src.push_str("Int64"),
+            Type::Float32 => self.src.push_str("Float32"),
+            Type::Float64 => self.src.push_str("Float64"),
+            Type::Char => self.src.push_str("Char"),
+            Type::String => self.src.push_str("String"),
+            Type::Id(id) => {
+                todo!()
+            }
+        }
+    }
+
     fn print_func_signature(&mut self, resolve: &Resolve, func: &Function) {
         todo!()
     }
@@ -281,31 +304,56 @@ impl<'a> InterfaceGenerator<'a> for GrainInterfaceGenerator<'a> {
         record: &wit_parser::Record,
         docs: &wit_parser::Docs,
     ) {
-        todo!()
+        if record.fields.is_empty() {
+            // Empty records don't exist in Grain
+            return;
+        }
+
+        self.src.push_str(&format!(
+            "export record {r} {{",
+            r = name.to_lower_camel_case()
+        ));
+        for (_i, field) in record.fields.iter().enumerate() {
+            self.src
+                .push_str(&format!("\n{f}: ", f = to_grain_ident(&field.name)));
+            self.print_ty(&field.ty);
+            self.src.push_str(",");
+        }
+        self.src.push_str("\n}")
     }
 
     fn type_resource(&mut self, id: TypeId, name: &str, docs: &wit_parser::Docs) {
         todo!()
     }
 
-    fn type_flags(
-        &mut self,
-        id: TypeId,
-        name: &str,
-        flags: &wit_parser::Flags,
-        docs: &wit_parser::Docs,
-    ) {
-        todo!()
+    fn type_flags(&mut self, id: TypeId, name: &str, flags: &Flags, docs: &wit_parser::Docs) {
+        let typename = name.to_lower_camel_case();
+        let ty = int_repr(flags_repr(flags));
+        self.src
+            .push_str(&format!("provide type {typename} = {ty}\n\n"));
+        let repr = flags_repr(flags);
+        for (i, field) in flags.flags.iter().enumerate() {
+            self.src.push_str(&format!(
+                "provide let _{}_{}: {typename} = {}.shl(1{}, {}{})\n",
+                name.to_shouty_snake_case(),
+                field.name.to_shouty_snake_case(),
+                int_repr(repr),
+                int_suffix(repr),
+                i,
+                int_suffix(repr),
+            ));
+        }
+        self.src.push_str("\n");
     }
 
     fn type_tuple(
         &mut self,
-        id: TypeId,
-        name: &str,
-        flags: &wit_parser::Tuple,
-        docs: &wit_parser::Docs,
+        _id: TypeId,
+        _name: &str,
+        _flags: &wit_parser::Tuple,
+        _docs: &wit_parser::Docs,
     ) {
-        todo!()
+        // No type needed
     }
 
     fn type_variant(
@@ -318,8 +366,8 @@ impl<'a> InterfaceGenerator<'a> for GrainInterfaceGenerator<'a> {
         todo!()
     }
 
-    fn type_option(&mut self, id: TypeId, name: &str, payload: &Type, docs: &wit_parser::Docs) {
-        todo!()
+    fn type_option(&mut self, _id: TypeId, _name: &str, _payload: &Type, _docs: &wit_parser::Docs) {
+        // No type needed
     }
 
     fn type_result(
@@ -524,5 +572,67 @@ impl<'a, 'b> FunctionBindgen<'a, 'b> {
 
     fn lift_id(&self) {
         todo!()
+    }
+}
+
+fn int_repr(repr: Int) -> &'static str {
+    match repr {
+        Int::U8 => "Int32",
+        Int::U16 => "Int32",
+        Int::U32 => "Int32",
+        Int::U64 => "Int64",
+    }
+}
+
+fn flags_repr(f: &Flags) -> Int {
+    match f.repr() {
+        FlagsRepr::U8 => Int::U8,
+        FlagsRepr::U16 => Int::U16,
+        FlagsRepr::U32(1) => Int::U32,
+        FlagsRepr::U32(2) => Int::U64,
+        repr => panic!("unimplemented flags {:?}", repr),
+    }
+}
+
+fn int_suffix(repr: Int) -> &'static str {
+    match repr {
+        Int::U8 => "l",
+        Int::U16 => "l",
+        Int::U32 => "l",
+        Int::U64 => "L",
+    }
+}
+
+fn to_grain_ident(name: &str) -> String {
+    match name {
+        "assert" => "assert_".into(),
+        "break" => "break_".into(),
+        "continue" => "continue_".into(),
+        "else" => "else_".into(),
+        "enum" => "enum_".into(),
+        "except" => "except_".into(),
+        "exception" => "exception_".into(),
+        "export" => "export_".into(),
+        "fail" => "fail_".into(),
+        "false" => "false_".into(),
+        "for" => "for_".into(),
+        "foreign" => "foreign_".into(),
+        "from" => "from_".into(),
+        "if" => "if_".into(),
+        "import" => "import_".into(),
+        "let" => "let_".into(),
+        "match" => "match_".into(),
+        "mut" => "mut_".into(),
+        "primitive" => "primitive_".into(),
+        "rec" => "rec_".into(),
+        "record" => "record_".into(),
+        "throw" => "throw_".into(),
+        "true" => "true_".into(),
+        "type" => "type_".into(),
+        "void" => "void_".into(),
+        "wasm" => "wasm_".into(),
+        "when" => "when_".into(),
+        "while" => "while_".into(),
+        s => s.to_lower_camel_case(),
     }
 }
