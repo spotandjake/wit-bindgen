@@ -70,6 +70,7 @@ default = [
   'teavm-java',
   'go',
   'csharp-naot',
+  'grain'
 ]
 c = ['dep:wit-bindgen-c']
 rust = ['dep:wit-bindgen-rust']
@@ -79,6 +80,7 @@ go = ['dep:wit-bindgen-go']
 csharp = ['dep:wit-bindgen-csharp']
 csharp-naot = ['csharp']
 csharp-mono = ['csharp']
+grain = ['dep:wit-bindgen-grain']
 
 [dev-dependencies]
 heck = { workspace = true }

@@ -64,6 +64,15 @@ enum Opt {
         #[clap(flatten)]
         args: Common,
     },
+
+    /// Generates bindings for Grain guest modules.
+    #[cfg(feature = "grain")]
+    Grain {
+        #[clap(flatten)]
+        opts: wit_bindgen_grain::Opts,
+        #[clap(flatten)]
+        args: Common,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -104,6 +113,8 @@ fn main() -> Result<()> {
         Opt::TinyGo { opts, args } => (opts.build(), args),
         #[cfg(feature = "csharp")]
         Opt::CSharp { opts, args } => (opts.build(), args),
+        #[cfg(feature = "grain")]
+        Opt::Grain { opts, args } => (opts.build(), args),
     };
 
     gen_world(generator, &opt, &mut files)?;
