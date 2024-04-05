@@ -7,11 +7,11 @@ use std::{
 use heck::*;
 use wit_bindgen_core::{
     abi::{self, AbiVariant, Bindgen, Bitcast, Instruction, LiftLower, WasmType},
-    uwrite, uwriteln,
+    dealias, uwrite, uwriteln,
     wit_parser::{
-        self, Case, Docs, Enum, EnumCase, Flags, FlagsRepr, Function, FunctionKind, Int, Interface,
-        InterfaceId, Record, Resolve, Result_, SizeAlign, Tuple, Type, TypeDef, TypeDefKind,
-        TypeId, Variant, WorldId, WorldKey,
+        self, Case, Docs, Enum, EnumCase, Flags, FlagsRepr, Function, FunctionKind, Handle, Int,
+        Interface, InterfaceId, Record, Resolve, Result_, SizeAlign, Tuple, Type, TypeDef,
+        TypeDefKind, TypeId, TypeOwner, Variant, WorldId, WorldKey,
     },
     Files, InterfaceGenerator, Ns, Source, TypeInfo, Types, WorldGenerator,
 };
@@ -39,6 +39,8 @@ pub struct Grain {
     types: Types,
     sizes: SizeAlign,
     interface_names: HashMap<InterfaceId, WorldKey>,
+    /// Each imported and exported interface is stored in this map. Value indicates if last use was import.
+    interface_last_seen_as_import: HashMap<InterfaceId, bool>,
 
     // Interfaces who have had their types printed.
     //
@@ -102,23 +104,40 @@ impl WorldGenerator for Grain {
         id: InterfaceId,
         _files: &mut Files,
     ) {
-        println!("importing interface");
+        self.interface_last_seen_as_import.insert(id, true);
         let wasm_import_module = resolve.name_world_key(name);
         // self.src
         //     .push_str(&format!("// Import functions from {wasm_import_module}\n"));
         self.interface_names.insert(id, name.clone());
-
+        
         let binding = Some(name);
-        println!("doing interface");
         let mut gen = self.interface(Some(&wasm_import_module), resolve, &binding, true);
-        println!("done doing interface");
         gen.interface = Some(id);
         if gen.gen.interfaces_with_types_printed.insert(id) {
             gen.types(id);
         }
+
+        let resources: Vec<&TypeId> = resolve.interfaces[id]
+            .types
+            .iter()
+            .filter_map(|t| match resolve.types[*(t.1)].kind {
+                TypeDefKind::Resource => Some(t.1),
+                _ => None,
+            })
+            .collect();
+
+        let freestanding_funcs: Vec<(&String, &Function)> = resolve.interfaces[id]
+            .functions
+            .iter()
+            .filter(|f| match f.1.kind {
+                FunctionKind::Freestanding => true,
+                _ => false,
+            })
+            .collect();
+
         gen.src.push_str(&format!("\n\n"));
 
-        gen.src.push_str("module ");
+        gen.src.push_str("provide module ");
         gen.src.push_str(
             &resolve.interfaces[id]
                 .name
@@ -126,18 +145,47 @@ impl WorldGenerator for Grain {
                 .unwrap()
                 .to_upper_camel_case(),
         );
-        gen.src.push_str("Imports {\n");
-        for (_name, func) in resolve.interfaces[id].functions.iter() {
-            println!("bouta import");
+        gen.src.push_str(" {\n");
+        for (_name, func) in freestanding_funcs.iter() {
+            gen.src.push_str("\n");
             gen.import(resolve, func);
-            println!("we imported");
+        }
+        for resource in resources.iter() {
+            let resource_funcs: Vec<(&String, &Function)> = resolve.interfaces[id]
+                .functions
+                .iter()
+                .filter(|f| match f.1.kind {
+                    FunctionKind::Method(id)
+                    | FunctionKind::Constructor(id)
+                    | FunctionKind::Static(id)
+                        if **resource == id =>
+                    {
+                        true
+                    }
+                    _ => false,
+                })
+                .collect();
+
+            gen.src.push_str("\nprovide module ");
+            gen.src.push_str(
+                &resolve.types[**resource]
+                    .name
+                    .as_ref()
+                    .unwrap()
+                    .to_upper_camel_case(),
+            );
+            gen.src.push_str(" {");
+            for (_name, func) in resource_funcs.iter() {
+                gen.src.push_str("\n");
+                gen.import(resolve, func);
+            }
+            gen.src.push_str("}\n");
         }
         gen.src.push_str("}\n\n");
         gen.finish();
 
         let src = mem::take(&mut gen.src);
         self.src.push_str(&src);
-        println!("done importing interface");
     }
     fn import_funcs(
         &mut self,
@@ -206,6 +254,7 @@ impl WorldGenerator for Grain {
         id: InterfaceId,
         _files: &mut Files,
     ) -> anyhow::Result<()> {
+        self.interface_last_seen_as_import.insert(id, false);
         self.interface_names.insert(id, name.clone());
         let name_raw = &resolve.name_world_key(name);
         self.src
@@ -218,7 +267,25 @@ impl WorldGenerator for Grain {
             gen.types(id);
         }
 
-        gen.src.push_str("module ");
+        let resources: Vec<&TypeId> = resolve.interfaces[id]
+            .types
+            .iter()
+            .filter_map(|t| match resolve.types[*(t.1)].kind {
+                TypeDefKind::Resource => Some(t.1),
+                _ => None,
+            })
+            .collect();
+
+        let freestanding_funcs: Vec<(&String, &Function)> = resolve.interfaces[id]
+            .functions
+            .iter()
+            .filter(|f| match f.1.kind {
+                FunctionKind::Freestanding => true,
+                _ => false,
+            })
+            .collect();
+
+        gen.src.push_str("\nmodule ");
         gen.src.push_str(
             &resolve.interfaces[id]
                 .name
@@ -226,9 +293,41 @@ impl WorldGenerator for Grain {
                 .unwrap()
                 .to_upper_camel_case(),
         );
-        gen.src.push_str("Exports {\n");
-        for (_name, func) in resolve.interfaces[id].functions.iter() {
+        gen.src.push_str("Exports {");
+        for (_name, func) in freestanding_funcs.iter() {
+            gen.src.push_str("\n");
             gen.export_stub(resolve, func, Some(name));
+        }
+        for resource in resources.iter() {
+            let resource_funcs: Vec<(&String, &Function)> = resolve.interfaces[id]
+                .functions
+                .iter()
+                .filter(|f| match f.1.kind {
+                    FunctionKind::Method(id)
+                    | FunctionKind::Constructor(id)
+                    | FunctionKind::Static(id)
+                        if **resource == id =>
+                    {
+                        true
+                    }
+                    _ => false,
+                })
+                .collect();
+
+            gen.src.push_str("\nprovide module ");
+            gen.src.push_str(
+                &resolve.types[**resource]
+                    .name
+                    .as_ref()
+                    .unwrap()
+                    .to_upper_camel_case(),
+            );
+            gen.src.push_str(" {");
+            for (_name, func) in resource_funcs.iter() {
+                gen.src.push_str("\n");
+                gen.export_stub(resolve, func, Some(name));
+            }
+            gen.src.push_str("}\n");
         }
         gen.src.push_str("}\n\n");
 
@@ -243,7 +342,12 @@ impl WorldGenerator for Grain {
         Ok(())
     }
 
-    fn finish(&mut self, resolve: &Resolve, world: WorldId, files: &mut Files) {
+    fn finish(
+        &mut self,
+        resolve: &Resolve,
+        world: WorldId,
+        files: &mut Files,
+    ) -> Result<(), anyhow::Error> {
         let world = &resolve.worlds[world];
         let mut full_src = Source::default();
 
@@ -271,16 +375,38 @@ impl WorldGenerator for Grain {
             ));
         }
 
+        full_src.push_str("@unsafe\n");
+        full_src.push_str("provide let cabi_realloc = (originalPtr: WasmI32, originalSize: WasmI32, alignment: WasmI32, newSize: WasmI32) => {\n");
+        full_src.push_str("if (WasmI32.eqz(originalPtr)) {\n");
+        full_src.push_str("Memory.malloc(newSize)\n");
+        full_src.push_str("} else {\n");
+        full_src.push_str("let newPtr = Memory.malloc(newSize)\n");
+        full_src.push_str(
+            "let amt = if (WasmI32.(<)(originalSize, newSize)) originalSize else newSize\n",
+        );
+        full_src.push_str("Memory.copy(newPtr, originalPtr, amt)\n");
+        full_src.push_str("Memory.free(originalPtr)\n");
+        full_src.push_str("newPtr\n");
+        full_src.push_str("}\n");
+        full_src.push_str("}\n\n");
+
+        full_src.push_str("provide record Resource<a> {\n");
+        full_src.push_str("mut handle: Int32,\n");
+        full_src.push_str("rep: a\n");
+        full_src.push_str("}\n\n");
+
         full_src.push_str(self.src.as_mut_string());
 
         files.push(
             &format!("{}.gr", world.name.to_lower_camel_case()),
             full_src.as_bytes(),
         );
+
+        Ok(())
     }
 }
 
-struct GrainInterfaceGenerator<'a> {
+pub struct GrainInterfaceGenerator<'a> {
     wasm_import_module: Option<&'a str>,
     src: Source,
     gen: &'a mut Grain,
@@ -304,6 +430,27 @@ impl GrainInterfaceGenerator<'_> {
             TypeDefKind::Record(r) => r.fields.is_empty(),
             TypeDefKind::Tuple(t) => t.types.is_empty(),
             _ => false,
+        }
+    }
+
+    pub fn is_exported_resource(&self, ty: TypeId) -> bool {
+        let ty = dealias(self.resolve, ty);
+        let ty = &self.resolve.types[ty];
+        match &ty.kind {
+            TypeDefKind::Resource => {}
+            _ => return false,
+        }
+
+        match ty.owner {
+            // Worlds cannot export types of any kind as of this writing.
+            TypeOwner::World(_) => false,
+
+            // Interfaces are "stateful" currently where whatever we last saw
+            // them as dictates whether it's exported or not.
+            TypeOwner::Interface(i) => !self.gen.interface_last_seen_as_import[&i],
+
+            // Shouldn't be the case for resources
+            TypeOwner::None => unreachable!(),
         }
     }
 
@@ -342,14 +489,20 @@ impl GrainInterfaceGenerator<'_> {
                     return;
                 }
                 self.src.push_str("(");
-                let singleton = types.len() == 1;
                 for (i, ty) in types.iter().enumerate() {
-                    self.print_ty(ty);
-                    if singleton || i != types.len() - 1 {
+                    if i != 0 {
                         self.src.push_str(", ");
                     }
+                    self.print_ty(ty);
                 }
                 self.src.push_str(")");
+            }
+            TypeDefKind::Handle(Handle::Own(ty)) => {
+                self.print_ty(&Type::Id(*ty));
+            }
+            TypeDefKind::Handle(Handle::Borrow(ty)) => {
+                // is_exported_resource
+                self.print_ty(&Type::Id(*ty));
             }
             _ => {
                 unreachable!()
@@ -514,7 +667,12 @@ impl GrainInterfaceGenerator<'_> {
         self.src.push_str(&export_name);
         self.src.push_str("\")\n");
         self.src.push_str("provide let ");
-        self.src.push_str(&to_grain_ident(&func.name));
+        self.src.push_str(&to_grain_ident(
+            &func
+                .core_export_name(wasm_module_export_name.as_deref())
+                .replace('.', "_")
+                .replace(':', "_"),
+        ));
         self.src.push_str(" = (");
         let sig = resolve.wasm_signature(AbiVariant::GuestExport, func);
         let mut params = Vec::new();
@@ -558,7 +716,7 @@ impl GrainInterfaceGenerator<'_> {
         interface_name: Option<&WorldKey>,
     ) {
         self.src.push_str("provide let ");
-        self.src.push_str(&to_grain_ident(&func.name));
+        self.src.push_str(&to_grain_ident(&func.item_name()));
         self.src.push_str(" = (");
         let length = func.params.len();
         for (i, (name, param)) in func.params.iter().enumerate() {
@@ -573,7 +731,7 @@ impl GrainInterfaceGenerator<'_> {
         self.src.push_str("(fail \"unimplemented\"): ");
         self.print_results(resolve, func);
         self.src.push_str("\n");
-        self.src.push_str("}\n\n");
+        self.src.push_str("}\n");
     }
 
     fn finish(&mut self) {
@@ -616,7 +774,46 @@ impl<'a> InterfaceGenerator<'a> for GrainInterfaceGenerator<'a> {
     }
 
     fn type_resource(&mut self, id: TypeId, name: &str, docs: &wit_parser::Docs) {
-        todo!()
+        let name = to_grain_ident(name);
+        let name_upper = name.to_upper_camel_case();
+        let module = match self.resolve.types[id].owner {
+            TypeOwner::World(_) => unimplemented!("resource exports from worlds"),
+            TypeOwner::Interface(id) => self.resolve.name_world_key(&WorldKey::Interface(id)),
+            TypeOwner::None => unimplemented!("should be impossible"),
+        };
+
+        if self.in_import {
+            self.src.push_str("provide record ");
+            self.src.push_str(&name.to_upper_camel_case());
+            self.src.push_str(" {\n");
+            self.src.push_str("handle: Int32\n");
+            self.src.push_str("}\n");
+        } else {
+            self.src.push_str("provide type ");
+            self.src.push_str(&name_upper);
+            self.src.push_str(" = Resource<Void>\n");
+
+            self.src.push_str(&format!(
+                r#"
+@externalName("[resource-new]{name}")
+foreign wasm new{name_upper}: WasmI32 -> WasmI32 from "[export]{module}"
+
+@externalName("[resource-rep]{name}")
+foreign wasm rep{name_upper}: WasmI32 -> WasmI32 from "[export]{module}"
+
+@unsafe
+let new{name_upper} = (rep) => {{
+  let v = {{handle: 0l, rep}}
+  let ptr = WasmI32.fromGrain(v)
+  Memory.incRef(ptr)
+  let handle = new{name_upper}(ptr)
+  let handle = WasmI32.toGrain(DataStructures.newInt32(handle)): Int32
+  v.handle = handle
+  v: {name_upper}
+}}
+"#
+            ))
+        }
     }
 
     fn type_flags(&mut self, id: TypeId, name: &str, flags: &Flags, docs: &wit_parser::Docs) {
@@ -668,7 +865,21 @@ impl<'a> InterfaceGenerator<'a> for GrainInterfaceGenerator<'a> {
         variant: &wit_parser::Variant,
         docs: &wit_parser::Docs,
     ) {
-        todo!()
+        self.src.push_str(&format!(
+            "provide enum {r} {{",
+            r = name.to_upper_camel_case()
+        ));
+        for case in variant.cases.iter() {
+            self.src.push_str("\n");
+            self.src.push_str(&case_name(&case.name));
+            if let Some(ty) = case.ty {
+                self.src.push_str("(");
+                self.print_ty(&ty);
+                self.src.push_str(")")
+            }
+            self.src.push_str(",");
+        }
+        self.src.push_str("\n}\n");
     }
 
     fn type_option(&mut self, _id: TypeId, _name: &str, _payload: &Type, _docs: &wit_parser::Docs) {
@@ -692,20 +903,47 @@ impl<'a> InterfaceGenerator<'a> for GrainInterfaceGenerator<'a> {
         enum_: &wit_parser::Enum,
         docs: &wit_parser::Docs,
     ) {
-        todo!()
+        self.src.push_str(&format!(
+            "provide enum {r} {{",
+            r = name.to_upper_camel_case()
+        ));
+        for case in enum_.cases.iter() {
+            self.src.push_str("\n");
+            self.src.push_str(&case_name(&case.name));
+            self.src.push_str(",");
+        }
+        self.src.push_str("\n}\n");
     }
 
     fn type_alias(&mut self, id: TypeId, name: &str, ty: &Type, docs: &wit_parser::Docs) {
+        let is_unnecessary_alias = match ty {
+            Type::Id(ty_id) => self.resolve.types[*ty_id].name == self.resolve.types[id].name,
+            _ => false
+        };
+        if !is_unnecessary_alias {
+            self.src.push_str(&format!(
+                "provide type {t} = ",
+                t = name.to_upper_camel_case()
+            ));
+            self.print_ty(ty);
+            self.src.push_str("\n")
+        }
+    }
+
+    fn type_list(&mut self, id: TypeId, name: &str, ty: &Type, docs: &wit_parser::Docs) {
         self.src.push_str(&format!(
             "provide type {t} = ",
             t = name.to_upper_camel_case()
         ));
-        self.print_ty(ty);
-        self.src.push_str("\n")
-    }
-
-    fn type_list(&mut self, id: TypeId, name: &str, ty: &Type, docs: &wit_parser::Docs) {
-        todo!()
+        match ty {
+            Type::Char => self.push_str("String\n"),
+            Type::U8 => self.push_str("Bytes\n"),
+            _ => {
+                self.src.push_str("List<");
+                self.print_ty(ty);
+                self.src.push_str(">\n");
+            }
+        }
     }
 
     fn type_builtin(&mut self, id: TypeId, name: &str, ty: &Type, docs: &wit_parser::Docs) {
@@ -1040,7 +1278,7 @@ pub trait GrainGenerator {
             self.push_str("provide ");
         }
         self.push_str("let ");
-        let func_name = &func.name;
+        let func_name = &func.item_name();
         self.push_str(&to_grain_ident(&func_name));
         self.push_str(": (");
         let mut params = Vec::new();
@@ -1118,14 +1356,20 @@ pub trait GrainGenerator {
                     return;
                 }
                 self.push_str("(");
-                let singleton = types.len() == 1;
                 for (i, ty) in types.iter().enumerate() {
-                    self.print_ty(resolve, ty);
-                    if singleton || i != types.len() - 1 {
+                    if i != 0 {
                         self.push_str(", ");
                     }
+                    self.print_ty(resolve, ty);
                 }
                 self.push_str(")");
+            }
+            TypeDefKind::Handle(Handle::Own(ty)) => {
+                self.print_ty(resolve, &Type::Id(*ty));
+            }
+            TypeDefKind::Handle(Handle::Borrow(ty)) => {
+                // is_exported_resource
+                self.print_ty(resolve, &Type::Id(*ty));
             }
             _ => {
                 unreachable!()
@@ -1437,8 +1681,9 @@ pub trait GrainFunctionGenerator {
         for (i, case) in enum_.cases.iter().enumerate() {
             if has_name {
                 let name = self.typename_lower(resolve, id);
-                result_operand.push_str(&name);
                 result_operand.push_str(&case_name(&case.name));
+                result_operand.push_str(": ");
+                result_operand.push_str(&name);
             } else {
                 unimplemented!()
             }
@@ -1458,7 +1703,6 @@ pub trait GrainFunctionGenerator {
         result: &mut String,
     ) {
         if resolve.types[id].name.is_some() {
-            result.push_str(&self.typename_lift(resolve, id));
             // result.push_str("::");
             result.push_str(&case_name(&case.name));
         } else {
@@ -1495,11 +1739,14 @@ pub trait GrainFunctionGenerator {
         for (case, block) in variant.cases.iter().zip(blocks) {
             if has_name {
                 let name = self.typename_lower(resolve, id);
-                result_operand.push_str(&name);
                 result_operand.push_str(&case_name(&case.name));
+
                 if let Some(_) = &case.ty {
                     result_operand.push_str("(e)")
                 }
+
+                result_operand.push_str(": ");
+                result_operand.push_str(&name);
             } else {
                 unimplemented!()
             }
@@ -1527,10 +1774,10 @@ pub trait GrainFunctionGenerator {
         result.push_str(block);
         let args = &ops.join(", ");
         if resolve.types[id].name.is_some() {
-            result.push_str(&self.typename_lift(resolve, id));
+            // result.push_str(&self.typename_lift(resolve, id));
             // result.push_str("::");
             result.push_str(&case_name(&case.name));
-            if let Some(_) = &case.ty {
+            if ops.len() > 0 {
                 result.push_str("(");
                 result.push_str(args);
                 result.push_str(")");
@@ -1637,11 +1884,11 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 operands[0]
             )),
             Instruction::U64FromI64 => results.push(format!(
-                "WasmI32.toGrain(DataStructures.newInt64({})): Int64",
+                "WasmI32.toGrain(DataStructures.newUint64({})): Uint64",
                 operands[0]
             )),
             Instruction::S64FromI64 => results.push(format!(
-                "WasmI32.toGrain(DataStructures.newUint64({})): Uint64",
+                "WasmI32.toGrain(DataStructures.newInt64({})): Int64",
                 operands[0]
             )),
 
@@ -1713,24 +1960,7 @@ impl Bindgen for FunctionBindgen<'_, '_> {
             }
 
             Instruction::Bitcasts { casts } => {
-                for (cast, op) in casts.iter().zip(operands) {
-                    let op = op;
-                    results.push(match cast {
-                        Bitcast::None => op.clone(),
-                        Bitcast::I32ToI64 => format!("WasmI64.extendI32S({})", op),
-                        Bitcast::F32ToI32 => format!("WasmI32.reinterpretF32({})", op),
-                        Bitcast::F64ToI64 => format!("WasmI64.reinterpretF64({})", op),
-                        Bitcast::I64ToI32 => format!("WasmI32.wrapI64({})", op),
-                        Bitcast::I32ToF32 => format!("WasmF32.reinterpretI32({})", op),
-                        Bitcast::I64ToF64 => format!("WasmF64.reinterpretI64({})", op),
-                        Bitcast::F32ToI64 => {
-                            format!("WasmI64.reinterpretF64(WasmF64.promoteF32({}))", op)
-                        }
-                        Bitcast::I64ToF32 => {
-                            format!("WasmF32.reinterpretI32(WasmI32.wrapI64({}))", op)
-                        }
-                    })
-                }
+                crate::bitcast(casts, operands, results)
             }
 
             Instruction::I32FromBool => results.push(format!(
@@ -1822,9 +2052,33 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 }
             }
 
-            Instruction::HandleLower { .. } => todo!(),
+            Instruction::HandleLower { handle, ty, .. } => {
+                results.push(format!(
+                    "WasmI32.load(WasmI32.fromGrain({}.handle), 4n)",
+                    operands.pop().unwrap(),
+                ))
+            },
 
-            Instruction::HandleLift { handle, ty, .. } => todo!(),
+            Instruction::HandleLift { handle, ty, name } => {
+                let (is_own, resource) = match handle {
+                    Handle::Borrow(resource) => (false, resource),
+                    Handle::Own(resource) => (true, resource),
+                };
+                if self.interface.is_exported_resource(*resource) {
+                    self.src.push_str(&format!("Memory.incRef({})\n", operands[0]));
+                    results.push(format!("WasmI32.toGrain({})", operands[0]));
+                } else {
+                    let tmp = self.locals.tmp("handle_lift");
+                    self.src.push_str(&format!(
+                        "let {} = {{handle: WasmI32.toGrain(DataStructures.newInt32({})),}}: ",
+                        tmp,
+                        operands.pop().unwrap()
+                    ));
+                    self.src.push_str(&self.typename_lift(resolve, *resource));
+                    self.src.push_str("\n");
+                    results.push(tmp);
+                }
+            },
 
             // TODO: checked
             Instruction::FlagsLower { flags, ty, .. } => match flags_repr(flags) {
@@ -1901,20 +2155,20 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 result_operand.push_str("match (");
                 result_operand.push_str(&operands[0]);
                 result_operand.push_str(") {\n");
-                for ((case, (block, block_results))) in variant.cases.iter().zip(blocks) {
+                for (case, (block, block_operands)) in variant.cases.iter().zip(blocks) {
                     result_operand.push_str(&case_name(&case.name));
                     if case.ty.is_some() {
                         result_operand.push_str("(e)")
                     }
                     result_operand.push_str(" => {\n");
                     result_operand.push_str(&block);
-                    // for (i, op) in block_operands.iter().enumerate() {
-                    //     result_operand.push_str(&format!(
-                    //         "{} = {}\n",
-                    //         format!("result{}_{}", tmp, i),
-                    //         op
-                    //     ))
-                    // }
+                    for (i, op) in block_operands.iter().enumerate() {
+                        result_operand.push_str(&format!(
+                            "{} = {}\n",
+                            format!("result{}_{}", tmp, i),
+                            op
+                        ))
+                    }
                     result_operand.push_str("},\n");
                 }
                 result_operand.push_str("}\n");
@@ -1946,7 +2200,7 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                     result.push_str(&case_name);
                     // result.push_str("::");
                     // result.push_str(&case_name(&case.name));
-                    if case.ty.is_none() {
+                    if !case.ty.is_none() {
                         result.push_str("(");
                         result.push_str(args);
                         result.push_str(")");
@@ -2055,8 +2309,16 @@ impl Bindgen for FunctionBindgen<'_, '_> {
             Instruction::ResultLift { result, ty, .. } => {
                 let (err, err_operands) = self.blocks.pop().unwrap();
                 let (ok, ok_operands) = self.blocks.pop().unwrap();
-                let err_args = &err_operands.join(", ");
-                let ok_args = &ok_operands.join(", ");
+                let err_args = if err_operands.len() < 1 { 
+                    "void".to_string() 
+                } else { 
+                    err_operands.join(", ") 
+                };
+                let ok_args = if ok_operands.len() < 1 { 
+                    "void".to_string()
+                } else {
+                     ok_operands.join(", ")
+                };
                 let operand = &operands[0];
                 results.push(format!(
                     "match ({operand}) {{
@@ -2183,7 +2445,7 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 ));
                 let size = self.interface.gen.sizes.size(element);
                 self.push_str(&format!(
-                    "let {} = Memory.malloc(WasmI32.mul({}, {}n))\n",
+                    "let {} = Memory.malloc(WasmI32.(*)({}, {}n))\n",
                     result, len, size
                 ));
                 self.push_str(&format!("let mut list = vec_{}\n", tmp));
@@ -2196,7 +2458,7 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 self.push_str(&format!("[e, ...rest] => {{\n",));
                 self.push_str(&format!("list = rest\n",));
                 self.push_str(&format!(
-                    "let base = WasmI32.(+)({}, WasmI32.mul(i, {}n))\n",
+                    "let base = WasmI32.(+)({}, WasmI32.(*)(i, {}n))\n",
                     result, size,
                 ));
                 self.push_str(&format!("i = WasmI32.(+)(i, 1n)\n"));
@@ -2228,15 +2490,14 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 self.push_str(&format!("let mut {} = []\n", result));
                 self.push_str(&format!("Memory.incRef(WasmI32.fromGrain({}))\n", result));
 
-                self.push_str("for (let mut i = WasmI32.sub(");
+                self.push_str("for (let mut i = WasmI32.(-)(");
                 self.push_str(&len);
-                self.push_str(", 1n); WasmI32.gtU(i, 0n); i = WasmI32.sub(i, 1n)) {\n");
+                self.push_str(", 1n); WasmI32.gtU(i, 0n); i = WasmI32.(-)(i, 1n)) {\n");
                 self.push_str("let base = WasmI32.(+)(");
                 self.push_str(&base);
-                self.push_str(", WasmI32.mul(i, ");
+                self.push_str(", WasmI32.(*)(i, ");
                 self.push_str(&size.to_string());
                 self.push_str("n))\n");
-                self.push_str("Memory.incRef(WasmI32.fromGrain(cons))\n");
                 self.push_str(&body);
                 self.push_str(&result);
                 self.push_str(" = [");
@@ -2286,7 +2547,7 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                     | FunctionKind::Method(ty)
                     | FunctionKind::Constructor(ty) => {
                         result_operand.push_str(&format!(
-                            "Bindgen{r}.{}",
+                            "{iface_name}Exports.{r}.{}",
                             &to_grain_ident(func.item_name()),
                             r = (resolve.types[*ty]
                                 .name
@@ -2408,6 +2669,12 @@ impl Bindgen for FunctionBindgen<'_, '_> {
             Instruction::F64Load { offset } => {
                 results.push(format!("WasmF64.load({}, {}n)", operands[0], offset));
             }
+            Instruction::LengthLoad { offset } => {
+                results.push(format!("WasmI32.load({}, {}n)", operands[0], offset));
+            }
+            Instruction::PointerLoad { offset } => {
+                results.push(format!("WasmI32.load({}, {}n)", operands[0], offset));
+            }
             Instruction::I32Store { offset } => {
                 self.push_str(&format!(
                     "WasmI32.store({}, {}, {}n)\n",
@@ -2441,6 +2708,18 @@ impl Bindgen for FunctionBindgen<'_, '_> {
             Instruction::F64Store { offset } => {
                 self.push_str(&format!(
                     "WasmF64.store({}, {}, {}n)\n",
+                    operands[1], operands[0], offset
+                ));
+            }
+            Instruction::LengthStore { offset } => {
+                self.push_str(&format!(
+                    "WasmI32.store({}, {}, {}n)\n",
+                    operands[1], operands[0], offset
+                ));
+            }
+            Instruction::PointerStore { offset } => {
+                self.push_str(&format!(
+                    "WasmI32.store({}, {}, {}n)\n",
                     operands[1], operands[0], offset
                 ));
             }
@@ -2511,6 +2790,9 @@ pub fn wasm_zero(ty: WasmType) -> &'static str {
         WasmType::I64 => "0N",
         WasmType::F32 => "0.0w",
         WasmType::F64 => "0.0W",
+        WasmType::Pointer => "0n",
+        WasmType::Length => "0n",
+        WasmType::PointerOrI64 => "0N",
     }
 }
 
@@ -2520,6 +2802,9 @@ pub fn wasm_type(ty: WasmType) -> &'static str {
         WasmType::I64 => "WasmI64",
         WasmType::F32 => "WasmF32",
         WasmType::F64 => "WasmF64",
+        WasmType::Pointer => "WasmI32",
+        WasmType::Length => "WasmI32",
+        WasmType::PointerOrI64 => "WasmI64",
     }
 }
 
@@ -2548,6 +2833,46 @@ fn int_suffix(repr: Int) -> &'static str {
         Int::U16 => "uS",
         Int::U32 => "ul",
         Int::U64 => "uL",
+    }
+}
+
+fn bitcast(casts: &[Bitcast], operands: &[String], results: &mut Vec<String>) {
+    for (cast, operand) in casts.iter().zip(operands) {
+        results.push(perform_cast(operand, cast));
+    }
+}
+
+fn perform_cast(operand: &str, cast: &Bitcast) -> String {
+    match cast {
+        Bitcast::None => operand.to_string(),
+        Bitcast::I32ToI64 => format!("WasmI64.extendI32S({})", operand),
+        Bitcast::F32ToI32 => format!("WasmI32.reinterpretF32({})", operand),
+        Bitcast::F64ToI64 => format!("WasmI64.reinterpretF64({})", operand),
+        Bitcast::I64ToI32 => format!("WasmI32.wrapI64({})", operand),
+        Bitcast::I32ToF32 => format!("WasmF32.reinterpretI32({})", operand),
+        Bitcast::I64ToF64 => format!("WasmF64.reinterpretI64({})", operand),
+        Bitcast::F32ToI64 => {
+            format!("WasmI64.reinterpretF64(WasmF64.promoteF32({}))", operand)
+        }
+        Bitcast::I64ToF32 => {
+            format!("WasmF32.reinterpretI32(WasmI32.wrapI64({}))", operand)
+        }
+        Bitcast::P64ToI64 |
+        Bitcast::I64ToP64 => operand.to_string(),
+        Bitcast::P64ToP => format!("WasmI32.wrapI64({})", operand),
+        Bitcast::PToP64 => format!("WasmI64.extendI32U({})", operand),
+        Bitcast::I32ToP |
+        Bitcast::PToI32 |
+        Bitcast::PToL |
+        Bitcast::LToP |
+        Bitcast::I32ToL |
+        Bitcast::LToI32 |
+        Bitcast::I64ToL |
+        Bitcast::LToI64 => operand.to_string(),
+        Bitcast::Sequence(sequence) => {
+            let [first, second] = &**sequence;
+            perform_cast(&perform_cast(operand, first), second)
+        }
     }
 }
 
@@ -2589,6 +2914,8 @@ fn to_grain_ident(name: &str) -> String {
         "wasm" => "wasm_".into(),
         "when" => "when_".into(),
         "while" => "while_".into(),
-        s => s.to_lower_camel_case(),
+        s => s.to_lower_camel_case()
+            .replace('.', "_")
+            .replace(':', "_"),
     }
 }
