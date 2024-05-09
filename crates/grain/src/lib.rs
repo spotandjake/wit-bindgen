@@ -1912,7 +1912,7 @@ impl Bindgen for FunctionBindgen<'_, '_> {
             }
             Instruction::I32FromS32 => {
                 results.push(format!(
-                    "WasmI32.load(WasmI32.fromGrain({}), 8n)",
+                    "WasmI32.load(WasmI32.fromGrain({}), 4n)",
                     operands[0]
                 ));
             }
