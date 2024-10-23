@@ -2490,9 +2490,9 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 self.push_str(&format!("let mut {} = []\n", result));
                 self.push_str(&format!("Memory.incRef(WasmI32.fromGrain({}))\n", result));
 
-                self.push_str("for (let mut i = WasmI32.(-)(");
+                self.push_str("for (let mut i = ");
                 self.push_str(&len);
-                self.push_str(", 1n); WasmI32.gtU(i, 0n); i = WasmI32.(-)(i, 1n)) {\n");
+                self.push_str("; WasmI32.gtU(i, 0n); i = WasmI32.(-)(i, 1n)) {\n");
                 self.push_str("let base = WasmI32.(+)(");
                 self.push_str(&base);
                 self.push_str(", WasmI32.(*)(i, ");
