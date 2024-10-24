@@ -2495,7 +2495,7 @@ impl Bindgen for FunctionBindgen<'_, '_> {
                 self.push_str("; WasmI32.gtU(i, 0n); i = WasmI32.(-)(i, 1n)) {\n");
                 self.push_str("let base = WasmI32.(+)(");
                 self.push_str(&base);
-                self.push_str(", WasmI32.(*)(i, ");
+                self.push_str(", WasmI32.(*)(WasmI32.(-)(i, 1n), ");
                 self.push_str(&size.to_string());
                 self.push_str("n))\n");
                 self.push_str(&body);
