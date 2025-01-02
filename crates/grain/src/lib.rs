@@ -2492,6 +2492,9 @@ impl Bindgen for FunctionBindgen<'_, '_> {
 
                 self.push_str("for (let mut i = WasmI32.(-)(");
                 self.push_str(&len);
+                // We loop from the end of the list to the start,
+                // because wasm is unsigned when we hit `0` we'll loop back around to `-1`
+                // and exit the loop.
                 self.push_str(", 1n); WasmI32.(!=)(i, -1n); i = WasmI32.(-)(i, 1n)) {\n");
                 self.push_str("let base = WasmI32.(+)(");
                 self.push_str(&base);
